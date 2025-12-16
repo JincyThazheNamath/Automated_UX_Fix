@@ -2,8 +2,20 @@ import { NextRequest, NextResponse } from 'next/server';
 import puppeteer from 'puppeteer';
 import Anthropic from '@anthropic-ai/sdk';
 
+// Validate API key on initialization
+const apiKey = process.env.ANTHROPIC_API_KEY || '';
+
+if (!apiKey) {
+  console.error('❌ ANTHROPIC_API_KEY is not set in environment variables');
+} else if (!apiKey.startsWith('sk-ant-')) {
+  console.error('❌ ANTHROPIC_API_KEY format appears invalid (should start with sk-ant-)');
+  console.error(`   Key starts with: ${apiKey.substring(0, 10)}...`);
+} else {
+  console.log('✅ ANTHROPIC_API_KEY loaded successfully');
+}
+
 const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY || '',
+  apiKey: apiKey,
 });
 
 interface AuditFinding {
@@ -26,12 +38,26 @@ interface AuditResult {
     high: number;
     medium: number;
     low: number;
+    accessibility: number;
+    usability: number;
+    design: number;
+    performance: number;
+    seo: number;
+    overallScore: number;
   };
   screenshot?: string;
 }
 
 export async function POST(request: NextRequest) {
   try {
+    // Validate API key before proceeding
+    if (!apiKey || !apiKey.startsWith('sk-ant-')) {
+      return NextResponse.json({ 
+        error: 'Invalid API key configuration. Please check your ANTHROPIC_API_KEY in .env.local file.',
+        details: apiKey ? 'API key format appears invalid' : 'API key is missing'
+      }, { status: 500 });
+    }
+
     const { url } = await request.json();
 
     if (!url) {
@@ -180,14 +206,80 @@ Return ONLY a valid JSON array of findings. Format:
 
 Focus on the most impactful issues. Return 8-15 findings total.`;
 
-    const message = await anthropic.messages.create({
-      model: 'claude-3-5-sonnet-20241022',
-      max_tokens: 4000,
-      messages: [{
-        role: 'user',
-        content: analysisPrompt,
-      }],
-    });
+    // Try multiple model names in order of preference
+    const modelNames = [
+      "claude-3-7-sonnet-latest",   // Best, newest
+      "claude-3-7-haiku-latest",    // Fast + cheap fallback
+      "claude-3-5-sonnet-latest",   // Legacy fallback
+      "claude-3-opus-latest",        // Legacy Opus
+      "claude-sonnet-4-20250514",
+      "claude-opus-4-20250514",
+      "claude-3-5-haiku-20241022"
+      // 'claude-3-5-sonnet-20240620', // Standard Claude 3.5 Sonnet
+      // 'claude-3-5-sonnet',           // Alternative format
+      // 'claude-3-opus-20240229',      // Fallback to Claude 3 Opus
+      // 'claude-3-sonnet-20240229',    // Fallback to Claude 3 Sonnet
+    ];
+
+    let message: any = null;
+    
+    try {
+      for (const modelName of modelNames) {
+        try {
+          message = await anthropic.messages.create({
+            model: modelName,
+            max_tokens: 4000,
+            messages: [{
+              role: 'user',
+              content: analysisPrompt,
+            }],
+          });
+          console.log(`✅ Successfully used model: ${modelName}`);
+          break; // Success, exit loop
+        } catch (modelError: any) {
+          if (modelError.status === 404 && modelNames.indexOf(modelName) < modelNames.length - 1) {
+            console.warn(`⚠️ Model ${modelName} not found, trying next...`);
+            continue; // Try next model
+          }
+          // If it's the last model or not a 404 error, throw it
+          if (modelNames.indexOf(modelName) === modelNames.length - 1 || modelError.status !== 404) {
+            throw modelError;
+          }
+        }
+      }
+      
+      if (!message) {
+        throw new Error('Failed to find a valid model');
+      }
+    } catch (apiError: any) {
+      console.error('Anthropic API Error:', apiError);
+      if (apiError.status === 401) {
+        return NextResponse.json({ 
+          error: 'Authentication failed. Please verify your ANTHROPIC_API_KEY is correct.',
+          details: 'The API key may be invalid, expired, or incorrectly formatted. Check your .env.local file and ensure the key starts with "sk-ant-"',
+          troubleshooting: [
+            '1. Verify API key in .env.local file',
+            '2. Ensure key starts with "sk-ant-"',
+            '3. Check for extra spaces or quotes around the key',
+            '4. Restart dev server after updating .env.local',
+            '5. Verify key is valid at https://console.anthropic.com/'
+          ]
+        }, { status: 401 });
+      }
+      if (apiError.status === 404) {
+        return NextResponse.json({ 
+          error: 'Model not found. The specified Claude model is not available.',
+          details: 'Tried multiple model names but none were found. This may indicate an API version mismatch.',
+          troubleshooting: [
+            '1. Check Anthropic API documentation for available models',
+            '2. Verify your API key has access to the requested model',
+            '3. Try updating @anthropic-ai/sdk package: npm install @anthropic-ai/sdk@latest',
+            '4. Check Anthropic console for model availability'
+          ]
+        }, { status: 404 });
+      }
+      throw apiError;
+    }
 
     let findings: AuditFinding[] = [];
     try {
@@ -220,6 +312,17 @@ Focus on the most impactful issues. Return 8-15 findings total.`;
       high: findings.filter(f => f.severity === 'high').length,
       medium: findings.filter(f => f.severity === 'medium').length,
       low: findings.filter(f => f.severity === 'low').length,
+      accessibility: findings.filter(f => f.category === 'accessibility').length,
+      usability: findings.filter(f => f.category === 'usability').length,
+      design: findings.filter(f => f.category === 'design').length,
+      performance: findings.filter(f => f.category === 'performance').length,
+      seo: findings.filter(f => f.category === 'seo').length,
+      overallScore: Math.max(0, 100 - (
+        findings.filter(f => f.severity === 'critical').length * 15 +
+        findings.filter(f => f.severity === 'high').length * 10 +
+        findings.filter(f => f.severity === 'medium').length * 5 +
+        findings.filter(f => f.severity === 'low').length * 2
+      )),
     };
 
     const result: AuditResult = {
@@ -239,4 +342,5 @@ Focus on the most impactful issues. Return 8-15 findings total.`;
     );
   }
 }
+
 
