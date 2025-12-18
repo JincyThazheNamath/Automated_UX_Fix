@@ -97,3 +97,5 @@ Or trigger via GitHub push.
 ✅ Never commit `.env.local` to Git (already in `.gitignore`)
 ✅ Vercel environment variables are secure and encrypted
 
+
+

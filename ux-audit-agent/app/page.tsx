@@ -5,6 +5,7 @@ import { Search, Loader2, AlertCircle } from 'lucide-react';
 import AuditFindingCard from '../components/AuditFindingCard';
 import SummaryCard from '../components/SummaryCard';
 import FilterDropdown from '../components/FilterDropdown';
+import { downloadReportAsHTML, openReportForPrint } from '../components/ReportGenerator';
 import { AuditFinding, AuditResult } from '../types/audit';
 
 export default function Home() {
@@ -567,45 +568,13 @@ Report ID: ${result.timestamp}
 
   const downloadReport = () => {
     if (!result) return;
-    
-    const report = generateShareableReport();
-    const blob = new Blob([report], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `ux-audit-report-${result.url.replace(/https?:\/\//, '').replace(/\//g, '-')}-${Date.now()}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    downloadReportAsHTML(result);
   };
 
   const shareReport = async () => {
     if (!result) return;
-    
-    const report = generateShareableReport();
-    const shareData = {
-      title: `UX Audit Report - ${result.url}`,
-      text: report,
-    };
-
-    try {
-      if (navigator.share) {
-        await navigator.share(shareData);
-      } else {
-        // Fallback: copy to clipboard
-        await navigator.clipboard.writeText(report);
-        alert('Report copied to clipboard!');
-      }
-    } catch (err) {
-      // Fallback: copy to clipboard
-      try {
-        await navigator.clipboard.writeText(report);
-        alert('Report copied to clipboard!');
-      } catch (e) {
-        console.error('Failed to share or copy:', e);
-      }
-    }
+    // Open report in new window for printing/PDF
+    openReportForPrint(result);
   };
 
   return (
