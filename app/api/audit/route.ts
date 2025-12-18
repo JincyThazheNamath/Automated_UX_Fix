@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import puppeteer from 'puppeteer';
+import puppeteer from 'puppeteer-core';
+import chromium from '@sparticuz/chromium';
 import Anthropic from '@anthropic-ai/sdk';
 
 // Validate API key on initialization
@@ -73,9 +74,23 @@ export async function POST(request: NextRequest) {
     }
 
     // Launch browser and crawl page
+    // Use Chromium for serverless environments (Vercel)
+    const isProduction = process.env.VERCEL === '1';
+    
     const browser = await puppeteer.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      args: isProduction 
+        ? [
+            ...chromium.args,
+            '--hide-scrollbars',
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process',
+          ]
+        : ['--no-sandbox', '--disable-setuid-sandbox'],
+      executablePath: isProduction 
+        ? await chromium.executablePath()
+        : undefined, // Use local Chrome in development
+      defaultViewport: chromium.defaultViewport,
     });
 
     const page = await browser.newPage();
