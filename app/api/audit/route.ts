@@ -75,22 +75,55 @@ export async function POST(request: NextRequest) {
 
     // Launch browser and crawl page
     // Use Chromium for serverless environments (Vercel)
-    const isProduction = process.env.VERCEL === '1';
+    const isProduction = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
+    
+    let executablePath: string | undefined;
+    let launchArgs: string[];
+    
+    if (isProduction) {
+      // For Vercel serverless, use Chromium from @sparticuz/chromium
+      try {
+        // Get Chromium executable path
+        executablePath = await chromium.executablePath();
+        
+        launchArgs = [
+          ...chromium.args,
+          '--hide-scrollbars',
+          '--disable-web-security',
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-gpu',
+        ];
+      } catch (error) {
+        console.error('Failed to get Chromium executable path:', error);
+        // Fallback: try without explicit executable path
+        executablePath = undefined;
+        launchArgs = [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-gpu',
+        ];
+      }
+    } else {
+      // Development: use local Chrome/Chromium
+      executablePath = undefined;
+      launchArgs = ['--no-sandbox', '--disable-setuid-sandbox'];
+    }
     
     const browser = await puppeteer.launch({
       headless: true,
-      args: isProduction 
-        ? [
-            ...chromium.args,
-            '--hide-scrollbars',
-            '--disable-web-security',
-            '--disable-features=IsolateOrigins,site-per-process',
-          ]
-        : ['--no-sandbox', '--disable-setuid-sandbox'],
-      executablePath: isProduction 
-        ? await chromium.executablePath()
-        : undefined, // Use local Chrome in development
-      defaultViewport: chromium.defaultViewport,
+      args: launchArgs,
+      executablePath: executablePath,
+      defaultViewport: isProduction ? chromium.defaultViewport : undefined,
     });
 
     const page = await browser.newPage();
