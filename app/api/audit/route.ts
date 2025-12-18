@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { chromium as playwrightChromium } from 'playwright';
+import puppeteer from 'puppeteer-core';
+import chromium from '@sparticuz/chromium-min';
 import Anthropic from '@anthropic-ai/sdk';
 
 // Validate API key on initialization
@@ -73,28 +74,22 @@ export async function POST(request: NextRequest) {
     }
 
     // Launch browser and crawl page
-    // Use Playwright Chromium for serverless environments (Vercel)
-    // Browsers should be installed during build via postinstall script
-    const browser = await playwrightChromium.launch({
+    // Use Puppeteer with @sparticuz/chromium-min for serverless environments (Vercel)
+    // @sparticuz/chromium-min is optimized for serverless and includes all dependencies
+    const isProduction = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
+    
+    const browser = await puppeteer.launch({
+      args: isProduction ? chromium.args : ['--no-sandbox', '--disable-setuid-sandbox'],
+      executablePath: isProduction ? await chromium.executablePath() : undefined,
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-gpu',
-      ],
     });
 
     const page = await browser.newPage();
-    await page.setViewportSize({ width: 1920, height: 1080 });
+    await page.setViewport({ width: 1920, height: 1080 });
     
     try {
       await page.goto(targetUrl.toString(), { 
-        waitUntil: 'networkidle',
+        waitUntil: 'networkidle2',
         timeout: 30000 
       });
     } catch (error) {
@@ -166,8 +161,7 @@ export async function POST(request: NextRequest) {
     });
 
     // Take screenshot
-    const screenshotBuffer = await page.screenshot({ fullPage: false });
-    const screenshot = screenshotBuffer.toString('base64');
+    const screenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
     await browser.close();
 
     // Analyze with AI

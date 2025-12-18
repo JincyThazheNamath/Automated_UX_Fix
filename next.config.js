@@ -2,11 +2,9 @@
 const nextConfig = {
   webpack: (config, { isServer }) => {
     if (isServer) {
-      // Exclude Playwright and browser packages from server-side bundling
+      // Exclude Chromium from server-side bundling
       config.externals = config.externals || [];
-      config.externals.push('playwright-core');
-      config.externals.push('playwright');
-      config.externals.push('@playwright/browser-chromium');
+      config.externals.push('@sparticuz/chromium-min');
     }
     return config;
   },

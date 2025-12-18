@@ -4,20 +4,18 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "playwright install chromium && next build",
+    "build": "next build",
     "start": "next start",
-    "lint": "eslint",
-    "postinstall": "playwright install chromium || true"
+    "lint": "eslint"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
-    "@playwright/browser-chromium": "^1.57.0",
+    "@sparticuz/chromium-min": "^143.0.0",
     "cheerio": "^1.1.2",
     "lucide-react": "^0.555.0",
     "next": "^14.2.35",
     "openai": "^6.9.1",
-    "playwright": "^1.57.0",
-    "playwright-core": "^1.57.0",
+    "puppeteer-core": "^24.33.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
