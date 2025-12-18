@@ -4,9 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "playwright install chromium && next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "playwright install chromium || true"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
@@ -16,6 +17,7 @@
     "next": "^14.2.35",
     "openai": "^6.9.1",
     "playwright": "^1.57.0",
+    "playwright-core": "^1.57.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },

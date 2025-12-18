@@ -74,7 +74,7 @@ export async function POST(request: NextRequest) {
 
     // Launch browser and crawl page
     // Use Playwright Chromium for serverless environments (Vercel)
-    // Playwright handles library dependencies better than Puppeteer on serverless
+    // Browsers should be installed during build via postinstall script
     const browser = await playwrightChromium.launch({
       headless: true,
       args: [
