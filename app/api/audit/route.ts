@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import puppeteer from 'puppeteer-core';
-import chromium from '@sparticuz/chromium';
+import { chromium as playwrightChromium } from 'playwright';
 import Anthropic from '@anthropic-ai/sdk';
 
 // Validate API key on initialization
@@ -74,33 +73,28 @@ export async function POST(request: NextRequest) {
     }
 
     // Launch browser and crawl page
-    // Use Chromium for serverless environments (Vercel)
-    const isProduction = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
-    
-    let browser;
-    
-    if (isProduction) {
-      // For Vercel serverless, use Chromium from @sparticuz/chromium
-      browser = await puppeteer.launch({
-        args: chromium.args,
-        defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath(),
-        headless: chromium.headless,
-      });
-    } else {
-      // Development: use local Chrome/Chromium
-      browser = await puppeteer.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      });
-    }
+    // Use Playwright Chromium for serverless environments (Vercel)
+    // Playwright handles library dependencies better than Puppeteer on serverless
+    const browser = await playwrightChromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-gpu',
+      ],
+    });
 
     const page = await browser.newPage();
-    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setViewportSize({ width: 1920, height: 1080 });
     
     try {
       await page.goto(targetUrl.toString(), { 
-        waitUntil: 'networkidle2',
+        waitUntil: 'networkidle',
         timeout: 30000 
       });
     } catch (error) {
@@ -172,7 +166,8 @@ export async function POST(request: NextRequest) {
     });
 
     // Take screenshot
-    const screenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
+    const screenshotBuffer = await page.screenshot({ fullPage: false });
+    const screenshot = screenshotBuffer.toString('base64');
     await browser.close();
 
     // Analyze with AI
