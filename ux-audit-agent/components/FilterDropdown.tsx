@@ -34,7 +34,7 @@ export default function FilterDropdown({
           <select
             value={filterCategory}
             onChange={(e) => onCategoryChange(e.target.value)}
-            className="bg-[#0a1628] border border-gray-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-teal-500"
+            className="bg-[#0a1628] border border-gray-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-teal-500 hover:border-gray-500 transition-all duration-200 cursor-pointer"
           >
             <option value="all">All Categories</option>
             <option value="accessibility">♿ Accessibility</option>
@@ -47,7 +47,7 @@ export default function FilterDropdown({
         <select
           value={filterSeverity}
           onChange={(e) => onSeverityChange(e.target.value)}
-          className="bg-[#0a1628] border border-gray-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-teal-500"
+          className="bg-[#0a1628] border border-gray-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-teal-500 hover:border-gray-500 transition-all duration-200 cursor-pointer"
         >
           <option value="all">All Severities</option>
           <option value="critical">Critical</option>

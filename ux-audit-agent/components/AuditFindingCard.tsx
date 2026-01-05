@@ -68,17 +68,17 @@ export default function AuditFindingCard({
 }: AuditFindingCardProps) {
   return (
     <div
-      className="border-2 border-gray-700/50 rounded-xl bg-[#0a1628] hover:border-teal-500/50 transition-all"
+      className="border-2 border-gray-700/50 rounded-xl bg-[#0a1628] hover:border-teal-500/50 hover:shadow-lg hover:shadow-teal-500/10 transition-all duration-200"
     >
       <div
-        className="p-6 cursor-pointer"
+        className="p-6 cursor-pointer hover:bg-[#0f1d35]/30 rounded-xl transition-colors duration-200"
         onClick={onToggle}
       >
         <div className="flex items-start justify-between">
           <div className="flex items-start gap-3 flex-1">
             <span className="text-2xl">{getCategoryIcon(finding.category)}</span>
             <div className="flex-1">
-              <h3 className="text-lg font-semibold text-white mb-2">
+              <h3 className="text-lg font-semibold text-white mb-2 leading-tight">
                 {finding.issue}
               </h3>
               <div className="flex flex-wrap items-center gap-2">
@@ -96,7 +96,7 @@ export default function AuditFindingCard({
               )}
             </div>
           </div>
-          <button className="ml-4 text-gray-400 hover:text-teal-400 transition-colors">
+          <button className="ml-4 text-gray-400 hover:text-teal-400 hover:bg-teal-500/10 rounded-lg p-1 transition-all duration-200 flex items-center justify-center">
             {isExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
           </button>
         </div>

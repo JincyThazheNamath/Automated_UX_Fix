@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import puppeteer from 'puppeteer';
+import puppeteer from 'puppeteer-core';
+import chromium from '@sparticuz/chromium';
 import Anthropic from '@anthropic-ai/sdk';
 
 // Validate API key on initialization
@@ -46,6 +47,158 @@ interface AuditResult {
     overallScore: number;
   };
   screenshot?: string;
+  realMetrics?: {
+    fcp: number;
+    lcp: number;
+    tti: number;
+    tbt: number;
+    cls: number;
+    speedIndex: number;
+  };
+}
+
+// Helper function to score individual metrics (Lighthouse-style)
+function scoreMetric(value: number, thresholds: [number, number], weight: number): number {
+  // thresholds: [good, needs-improvement]
+  // good = 100, needs-improvement = 50, poor = 0
+  let score = 100;
+  if (value <= thresholds[0]) {
+    score = 100;
+  } else if (value <= thresholds[1]) {
+    // Linear interpolation between good and needs-improvement
+    score = 100 - ((value - thresholds[0]) / (thresholds[1] - thresholds[0])) * 50;
+  } else {
+    score = 0;
+  }
+  return score * weight;
+}
+
+// Analyze accessibility tree and extract violations
+interface AccessibilityIssue {
+  type: string;
+  role?: string;
+  severity: 'critical' | 'high' | 'medium' | 'low';
+}
+
+function analyzeAccessibilityTree(snapshot: any): { critical: number; high: number; medium: number; low: number; issues: AccessibilityIssue[] } {
+  const issues: AccessibilityIssue[] = [];
+  let critical = 0, high = 0, medium = 0, low = 0;
+
+  function traverse(node: any) {
+    if (!node) return;
+
+    // Check for missing labels
+    if (node.role && ['textbox', 'combobox', 'listbox', 'button'].includes(node.role)) {
+      if (!node.name && !node.value) {
+        issues.push({ type: 'missing-label', role: node.role, severity: 'high' });
+        high++;
+      }
+    }
+
+    // Check for missing ARIA labels on interactive elements
+    if (node.role && ['button', 'link', 'checkbox', 'radio'].includes(node.role)) {
+      if (!node.name && !node.value) {
+        issues.push({ type: 'missing-aria-label', role: node.role, severity: 'medium' });
+        medium++;
+      }
+    }
+
+    // Check for heading hierarchy issues
+    if (node.role === 'heading' && !node.name) {
+      issues.push({ type: 'empty-heading', severity: 'medium' });
+      medium++;
+    }
+
+    // Recursively traverse children
+    if (node.children) {
+      node.children.forEach((child: any) => traverse(child));
+    }
+  }
+
+  traverse(snapshot);
+  return { critical, high, medium, low, issues };
+}
+
+// Calculate accessibility score based on violations
+function calculateAccessibilityScore(issues: { critical: number; high: number; medium: number; low: number }): number {
+  let score = 100;
+  score -= issues.critical * 10;
+  score -= issues.high * 5;
+  score -= issues.medium * 2;
+  score -= issues.low * 1;
+  return Math.max(0, Math.min(100, score));
+}
+
+// Check for structured data (JSON-LD, microdata)
+function checkStructuredData(html: string): boolean {
+  // Check for JSON-LD
+  if (html.includes('application/ld+json')) {
+    return true;
+  }
+  // Check for microdata
+  if (html.includes('itemscope') || html.includes('itemtype')) {
+    return true;
+  }
+  return false;
+}
+
+// Check for semantic HTML elements
+function checkSemanticHTML(html: string): boolean {
+  const semanticElements = ['<header', '<nav', '<main', '<article', '<section', '<aside', '<footer'];
+  return semanticElements.some(el => html.toLowerCase().includes(el));
+}
+
+// Calculate SEO score based on validation data
+function calculateSEOScore(seoData: {
+  hasMetaDescription: boolean;
+  metaDescriptionLength: number;
+  titleLength: number;
+  hasStructuredData: boolean;
+  semanticHTML: boolean;
+  altTextCoverage: number;
+  hasCanonical: boolean;
+  hasOpenGraph: boolean;
+}): number {
+  let score = 0;
+  
+  // Meta description: +10 if present and 50-160 chars
+  if (seoData.hasMetaDescription && seoData.metaDescriptionLength >= 50 && seoData.metaDescriptionLength <= 160) {
+    score += 10;
+  }
+  
+  // Title: +10 if 30-60 chars
+  if (seoData.titleLength >= 30 && seoData.titleLength <= 60) {
+    score += 10;
+  }
+  
+  // Structured data: +15 if present
+  if (seoData.hasStructuredData) {
+    score += 15;
+  }
+  
+  // Alt text coverage: +10 if >80%
+  if (seoData.altTextCoverage > 0.8) {
+    score += 10;
+  } else if (seoData.altTextCoverage > 0.5) {
+    score += 5;
+  }
+  
+  // Semantic HTML: +10 if proper structure
+  if (seoData.semanticHTML) {
+    score += 10;
+  }
+  
+  // Canonical: +5 if present
+  if (seoData.hasCanonical) {
+    score += 5;
+  }
+  
+  // Open Graph: +10 if present
+  if (seoData.hasOpenGraph) {
+    score += 10;
+  }
+  
+  return Math.min(100, score);
 }
 
 export async function POST(request: NextRequest) {
@@ -73,10 +226,90 @@ export async function POST(request: NextRequest) {
     }
 
     // Launch browser and crawl page
-    const browser = await puppeteer.launch({
+    // Use Puppeteer with @sparticuz/chromium for serverless environments (Vercel)
+    const isProduction = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
+    
+    const launchOptions: any = {
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+      args: chromium.args || [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-gpu',
+      ],
+    };
+
+    if (isProduction) {
+      // Production: Use Chromium from @sparticuz/chromium
+      launchOptions.executablePath = await chromium.executablePath();
+    } else {
+      // Development: Try to find local Chrome/Chromium
+      const fs = require('fs');
+      const path = require('path');
+      
+      const possiblePaths: string[] = [];
+      
+      if (process.platform === 'win32') {
+        possiblePaths.push(
+          'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+          'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+          path.join(process.env.LOCALAPPDATA || '', 'Google\\Chrome\\Application\\chrome.exe'),
+          path.join(process.env.PROGRAMFILES || '', 'Google\\Chrome\\Application\\chrome.exe'),
+          path.join(process.env['PROGRAMFILES(X86)'] || '', 'Google\\Chrome\\Application\\chrome.exe')
+        );
+      } else if (process.platform === 'darwin') {
+        possiblePaths.push(
+          '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+          '/Applications/Chromium.app/Contents/MacOS/Chromium'
+        );
+      } else {
+        possiblePaths.push(
+          '/usr/bin/google-chrome',
+          '/usr/bin/chromium',
+          '/usr/bin/chromium-browser',
+          '/snap/bin/chromium'
+        );
+      }
+      
+      let foundPath: string | null = null;
+      for (const chromePath of possiblePaths) {
+        try {
+          if (fs.existsSync(chromePath)) {
+            foundPath = chromePath;
+            break;
+          }
+        } catch (e) {
+          // Continue searching
+        }
+      }
+      
+      if (foundPath) {
+        launchOptions.executablePath = foundPath;
+        console.log('Development: Using local Chrome at:', foundPath);
+      } else {
+        // If Chrome not found, try using chromium from @sparticuz/chromium as fallback
+        try {
+          launchOptions.executablePath = await chromium.executablePath();
+          console.log('Development: Using @sparticuz/chromium as fallback');
+        } catch (chromiumError) {
+          return NextResponse.json({ 
+            error: 'Chrome/Chromium not found. Please install Google Chrome or set CHROME_PATH environment variable.',
+            details: 'puppeteer-core requires an executablePath. Chrome was not found in common installation locations.',
+            troubleshooting: [
+              '1. Install Google Chrome from https://www.google.com/chrome/',
+              '2. Or set CHROME_PATH environment variable to your Chrome executable path',
+              '3. Or use production deployment (Vercel) which includes Chromium automatically'
+            ]
+          }, { status: 500 });
+        }
+      }
+    }
+
+    const browser = await puppeteer.launch(launchOptions);
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
@@ -91,6 +324,140 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ 
         error: 'Failed to load page. Please check the URL is accessible.' 
       }, { status: 400 });
+    }
+
+    // Enable Performance API and wait for page to stabilize
+    await page.evaluate(() => {
+      performance.mark('audit-start');
+    });
+    // Wait for page to stabilize (2 seconds)
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Collect performance metrics using Performance API
+    const performanceMetrics = await page.evaluate(() => {
+      const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming;
+      if (!navigation) {
+        // Fallback if navigation timing not available
+        return {
+          fcp: 0,
+          lcp: 0,
+          tti: 0,
+          tbt: 0,
+          cls: 0,
+          speedIndex: 0,
+          domContentLoaded: 0,
+          loadComplete: 0,
+        };
+      }
+
+      const paint = performance.getEntriesByType('paint');
+      const fcp = paint.find(p => p.name === 'first-contentful-paint')?.startTime || 0;
+      
+      // Calculate TTI (Time to Interactive) - simplified
+      const tti = navigation.domInteractive ? (navigation.domInteractive - navigation.fetchStart) : 0;
+      
+      // Calculate CLS (Cumulative Layout Shift) - collect from PerformanceObserver if available
+      let cls = 0;
+      try {
+        const layoutShifts = (performance.getEntriesByType('layout-shift') as any[]);
+        if (layoutShifts && layoutShifts.length > 0) {
+          cls = layoutShifts.reduce((sum: number, entry: any) => {
+            if (!entry.hadRecentInput) {
+              return sum + (entry.value || 0);
+            }
+            return sum;
+          }, 0);
+        }
+      } catch (e) {
+        // CLS not available - will default to 0
+        console.warn('CLS calculation not available');
+      }
+      
+      // Calculate TBT (Total Blocking Time) - from long tasks
+      let tbt = 0;
+      try {
+        const longTasks = (performance.getEntriesByType('longtask') as any[]);
+        if (longTasks && longTasks.length > 0) {
+          tbt = longTasks.reduce((sum: number, task: any) => {
+            const blockingTime = (task.duration || 0) - 50;
+            return sum + Math.max(0, blockingTime);
+          }, 0);
+        }
+      } catch (e) {
+        // Long tasks not available - will default to 0
+        console.warn('TBT calculation not available');
+      }
+      
+      // Calculate LCP (Largest Contentful Paint)
+      let lcp = 0;
+      try {
+        const lcpEntries = (performance.getEntriesByType('largest-contentful-paint') as any[]);
+        if (lcpEntries && lcpEntries.length > 0) {
+          // Get the last LCP entry (most recent)
+          const lastLCP = lcpEntries[lcpEntries.length - 1];
+          lcp = lastLCP.renderTime || lastLCP.loadTime || lastLCP.startTime || 0;
+        } else {
+          // Fallback: estimate from load event
+          lcp = navigation.loadEventEnd ? (navigation.loadEventEnd - navigation.fetchStart) : 0;
+        }
+      } catch (e) {
+        // LCP not available, estimate from load time
+        lcp = navigation.loadEventEnd ? (navigation.loadEventEnd - navigation.fetchStart) : 0;
+      }
+      
+      // Calculate Speed Index - estimate based on FCP and DCL
+      const domContentLoaded = navigation.domContentLoadedEventEnd ? 
+        (navigation.domContentLoadedEventEnd - navigation.fetchStart) : 0;
+      const speedIndex = Math.max(
+        domContentLoaded,
+        fcp > 0 ? fcp * 1.5 : domContentLoaded
+      );
+      
+      return {
+        fcp: Math.round(fcp),
+        lcp: Math.round(lcp),
+        tti: Math.round(tti),
+        tbt: Math.round(tbt),
+        cls: Math.round(cls * 100) / 100,
+        speedIndex: Math.round(speedIndex),
+        domContentLoaded: domContentLoaded,
+        loadComplete: navigation.loadEventEnd ? (navigation.loadEventEnd - navigation.fetchStart) : 0,
+      };
+    });
+
+    // Calculate Lighthouse-style performance score
+    const calculatePerformanceScore = (metrics: typeof performanceMetrics): number => {
+      // Handle edge cases where metrics might be 0 or unavailable
+      // If all metrics are 0, return a default score of 50 (needs improvement)
+      if (metrics.fcp === 0 && metrics.lcp === 0 && metrics.tti === 0) {
+        return 50;
+      }
+
+      const scores = {
+        fcp: metrics.fcp > 0 ? scoreMetric(metrics.fcp, [1800, 3000], 0.10) : 5, // Default to 50% if unavailable
+        lcp: metrics.lcp > 0 ? scoreMetric(metrics.lcp, [2500, 4000], 0.25) : 12.5,
+        tti: metrics.tti > 0 ? scoreMetric(metrics.tti, [3800, 7300], 0.10) : 5,
+        tbt: scoreMetric(metrics.tbt, [200, 600], 0.30), // TBT can be 0 (good)
+        cls: scoreMetric(metrics.cls, [0.1, 0.25], 0.15), // CLS can be 0 (good)
+        speedIndex: metrics.speedIndex > 0 ? scoreMetric(metrics.speedIndex, [3400, 5800], 0.10) : 5,
+      };
+      const totalScore = Object.values(scores).reduce((sum, score) => sum + score, 0);
+      return Math.max(0, Math.min(100, Math.round(totalScore)));
+    };
+
+    const performanceScore = calculatePerformanceScore(performanceMetrics);
+
+    // Get accessibility snapshot
+    let accessibilitySnapshot: any = null;
+    let accessibilityIssues: { critical: number; high: number; medium: number; low: number; issues: AccessibilityIssue[] } = { critical: 0, high: 0, medium: 0, low: 0, issues: [] };
+    let accessibilityScore = 100;
+    
+    try {
+      accessibilitySnapshot = await page.accessibility.snapshot();
+      accessibilityIssues = analyzeAccessibilityTree(accessibilitySnapshot);
+      accessibilityScore = calculateAccessibilityScore(accessibilityIssues);
+    } catch (error) {
+      console.warn('Accessibility snapshot failed:', error);
     }
 
     // Extract page data
@@ -140,9 +507,14 @@ export async function POST(request: NextRequest) {
         .slice(0, 20)
         .map(el => getComputedStyles(el));
 
+      const metaDescription = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
+      const canonical = document.querySelector('link[rel="canonical"]');
+      const openGraph = document.querySelector('meta[property^="og:"]');
+
       return {
         title: document.title,
-        metaDescription: document.querySelector('meta[name="description"]')?.getAttribute('content') || '',
+        metaDescription,
+        metaDescriptionLength: metaDescription.length,
         url: window.location.href,
         images,
         links,
@@ -151,15 +523,77 @@ export async function POST(request: NextRequest) {
         forms,
         textStyles: textElements,
         html: document.documentElement.outerHTML.substring(0, 50000), // Limit HTML size
+        hasCanonical: !!canonical,
+        hasOpenGraph: !!openGraph,
       };
     });
+
+    // Calculate SEO validation data
+    const seoData = {
+      hasMetaDescription: !!pageData.metaDescription,
+      metaDescriptionLength: pageData.metaDescriptionLength || 0,
+      titleLength: pageData.title.length,
+      hasStructuredData: checkStructuredData(pageData.html),
+      semanticHTML: checkSemanticHTML(pageData.html),
+      altTextCoverage: pageData.images.length > 0 
+        ? pageData.images.filter(i => i.hasAlt).length / pageData.images.length 
+        : 1,
+      hasCanonical: pageData.hasCanonical || false,
+      hasOpenGraph: pageData.hasOpenGraph || false,
+    };
+
+    const seoScore = calculateSEOScore(seoData);
 
     // Take screenshot
     const screenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
     await browser.close();
 
-    // Analyze with AI
-    const analysisPrompt = `You are a UX audit expert. Analyze the following website data and identify UX issues.
+    // Analyze with AI using weighted UX & SEO audit framework with REAL METRICS
+    const analysisPrompt = `Act as a Senior UX & SEO Auditor. Analyze the provided website using REAL METRICS and Lighthouse-calibrated scoring.
+
+### REAL PERFORMANCE METRICS (Lighthouse-style):
+- FCP (First Contentful Paint): ${performanceMetrics.fcp}ms (thresholds: good <1800ms, needs-improvement <3000ms)
+- LCP (Largest Contentful Paint): ${performanceMetrics.lcp}ms (thresholds: good <2500ms, needs-improvement <4000ms)
+- TTI (Time to Interactive): ${performanceMetrics.tti}ms (thresholds: good <3800ms, needs-improvement <7300ms)
+- TBT (Total Blocking Time): ${performanceMetrics.tbt}ms (thresholds: good <200ms, needs-improvement <600ms)
+- CLS (Cumulative Layout Shift): ${performanceMetrics.cls} (thresholds: good <0.1, needs-improvement <0.25)
+- Speed Index: ${performanceMetrics.speedIndex}ms (thresholds: good <3400ms, needs-improvement <5800ms)
+
+**CALCULATED PERFORMANCE SCORE**: ${performanceScore}/100 (using Lighthouse weighted formula)
+
+### REAL ACCESSIBILITY VIOLATIONS:
+- Critical: ${accessibilityIssues.critical}
+- High: ${accessibilityIssues.high}
+- Medium: ${accessibilityIssues.medium}
+- Low: ${accessibilityIssues.low}
+- Total Issues: ${accessibilityIssues.issues.length}
+
+**CALCULATED ACCESSIBILITY SCORE**: ${accessibilityScore}/100 (based on violation severity)
+
+### REAL SEO VALIDATION:
+- Meta Description: ${seoData.hasMetaDescription ? 'Present' : 'Missing'} (${seoData.metaDescriptionLength} chars, optimal: 50-160)
+- Title Length: ${seoData.titleLength} chars (optimal: 30-60)
+- Structured Data: ${seoData.hasStructuredData ? 'Present' : 'Missing'}
+- Semantic HTML: ${seoData.semanticHTML ? 'Present' : 'Missing'}
+- Alt Text Coverage: ${Math.round(seoData.altTextCoverage * 100)}% (optimal: >80%)
+- Canonical URL: ${seoData.hasCanonical ? 'Present' : 'Missing'}
+- Open Graph Tags: ${seoData.hasOpenGraph ? 'Present' : 'Missing'}
+
+**CALCULATED SEO SCORE**: ${seoScore}/100 (based on validation checks)
+
+### SCORING CALIBRATION (Match Lighthouse Methodology):
+
+1. **Performance Score**: USE THE CALCULATED SCORE ABOVE (${performanceScore}/100). This is already calculated from real metrics using Lighthouse's weighted formula:
+   - FCP(10%) + LCP(25%) + TTI(10%) + TBT(30%) + CLS(15%) + SpeedIndex(10%)
+
+2. **Accessibility Score**: USE THE CALCULATED SCORE ABOVE (${accessibilityScore}/100). This is based on real violations:
+   - Start at 100, deduct: Critical(-10), High(-5), Medium(-2), Low(-1)
+
+3. **SEO Score**: USE THE CALCULATED SCORE ABOVE (${seoScore}/100). This is based on real validation checks.
+
+4. **Design Score**: Analyze visual hierarchy, UI consistency, and design quality. Calibrate to match typical Lighthouse "Best Practices" scoring (0-100).
+
+### WEBSITE DATA FOR DESIGN ANALYSIS
 
 Website URL: ${targetUrl.toString()}
 Page Title: ${pageData.title}
@@ -172,39 +606,51 @@ Page Structure:
 - Buttons: ${pageData.buttons.length} total
 - Forms: ${pageData.forms.length} total
 
-HTML Sample (first 50k chars):
+HTML Sample (first 10k chars):
 ${pageData.html.substring(0, 10000)}
 
-Analyze this website and identify UX issues in these categories:
-1. Accessibility (WCAG compliance, alt text, ARIA labels, keyboard navigation)
-2. Usability (navigation clarity, call-to-action visibility, form usability)
-3. Design Consistency (color schemes, typography, spacing)
-4. Performance (image optimization, loading states)
-5. SEO (meta tags, heading structure, semantic HTML)
+### OUTPUT FORMAT:
 
-For each issue found, provide:
-- category: one of "accessibility", "usability", "design", "performance", "seo"
-- severity: "critical", "high", "medium", or "low"
-- issue: brief title
-- description: detailed explanation
-- location: where on the page (e.g., "header navigation", "contact form")
-- suggestion: actionable fix recommendation
-- codeSnippet: if applicable, provide HTML/CSS code example for the fix
+Return a JSON object. Return ONLY valid JSON:
 
-Return ONLY a valid JSON array of findings. Format:
-[
-  {
-    "category": "accessibility",
-    "severity": "high",
-    "issue": "Missing alt text on images",
-    "description": "X images lack alt attributes, impacting screen reader users",
-    "location": "Hero section",
-    "suggestion": "Add descriptive alt text to all images",
-    "codeSnippet": "<img src='...' alt='Descriptive text here' />"
-  }
-]
+{
+  "scores": {
+    "performance": ${performanceScore},
+    "accessibility": ${accessibilityScore},
+    "design": [Number 0-100, your analysis],
+    "seo": ${seoScore}
+  },
+  "overall_ux_score": [Number calculated as: (Performance*0.3 + Accessibility*0.3 + Design*0.25 + SEO*0.15)],
+  "justification": "Short reason for these specific numbers, especially the design score",
+  "severity_breakdown": {"critical": X, "high": X, "medium": X, "low": X},
+  "top_issues": [
+    {
+      "category": "accessibility|usability|design|performance|seo",
+      "severity": "critical|high|medium|low",
+      "issue": "Brief issue title",
+      "description": "Detailed explanation of the issue and its impact",
+      "location": "Where on the page (e.g., 'header navigation', 'contact form')",
+      "suggestion": "Actionable fix recommendation",
+      "codeSnippet": "HTML/CSS code example if applicable, or empty string"
+    }
+  ]
+}
 
-Focus on the most impactful issues. Return 8-15 findings total.`;
+IMPORTANT: 
+- Use the EXACT performance score (${performanceScore}), accessibility score (${accessibilityScore}), and SEO score (${seoScore}) provided above
+- Only calculate the design score yourself based on visual analysis
+- Calculate overall_ux_score using: Performance*0.3 + Accessibility*0.3 + Design*0.25 + SEO*0.15
+
+For each finding in top_issues:
+- category: one of "accessibility", "usability", "design", "seo"
+- severity: "critical", "high", "medium", or "low" based on impact
+- issue: concise, actionable title
+- description: detailed explanation with user impact
+- location: specific area of the page
+- suggestion: actionable, implementable recommendation
+- codeSnippet: practical code example when applicable
+
+Focus on the most impactful issues. Return 8-15 findings in top_issues array.`;
 
     // Try multiple model names in order of preference
     const modelNames = [
@@ -282,17 +728,85 @@ Focus on the most impactful issues. Return 8-15 findings total.`;
     }
 
     let findings: AuditFinding[] = [];
+    let uxScore = 0;
+    let severityBreakdown = { critical: 0, high: 0, medium: 0, low: 0 };
+    let categoryScores = { 
+      performance: performanceScore, 
+      accessibility: accessibilityScore, 
+      usability: 0, 
+      design: 0, 
+      seo: seoScore 
+    };
+    let justification = '';
+    
     try {
       const content = message.content[0];
       if (content.type === 'text') {
-        const jsonMatch = content.text.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-          findings = JSON.parse(jsonMatch[0]);
+        // Try to extract JSON object with scores format (newest), ux_score format, or array (legacy)
+        const scoresFormatMatch = content.text.match(/\{[\s\S]*"scores"[\s\S]*\}/);
+        const uxScoreFormatMatch = content.text.match(/\{[\s\S]*"ux_score"[\s\S]*\}/);
+        const jsonArrayMatch = content.text.match(/\[[\s\S]*\]/);
+        
+        if (scoresFormatMatch) {
+          // Newest format with scores object and weighted calculation
+          const auditData = JSON.parse(scoresFormatMatch[0]);
+          if (auditData.scores) {
+            // Use real calculated scores for performance, accessibility, and SEO
+            // Only use AI-provided design score
+            categoryScores = {
+              performance: auditData.scores.performance || performanceScore,
+              accessibility: auditData.scores.accessibility || accessibilityScore,
+              usability: auditData.scores.usability || 0,
+              design: auditData.scores.design || 0,
+              seo: auditData.scores.seo || seoScore,
+            };
+            // Calculate overall score using weighted formula: (Performance*0.3 + Accessibility*0.3 + Design*0.25 + SEO*0.15)
+            uxScore = Math.round((
+              categoryScores.performance * 0.3 +
+              categoryScores.accessibility * 0.3 +
+              categoryScores.design * 0.25 +
+              categoryScores.seo * 0.15
+            ) * 100) / 100; // Round to 2 decimal places
+          } else {
+            // Fallback to overall_ux_score if scores not provided
+            uxScore = auditData.overall_ux_score || 0;
+          }
+          justification = auditData.justification || '';
+          severityBreakdown = auditData.severity_breakdown || { critical: 0, high: 0, medium: 0, low: 0 };
+          findings = auditData.top_issues || [];
+        } else if (uxScoreFormatMatch) {
+          // Format with ux_score, severity_breakdown, top_issues
+          const auditData = JSON.parse(uxScoreFormatMatch[0]);
+          uxScore = auditData.ux_score || 0;
+          severityBreakdown = auditData.severity_breakdown || { critical: 0, high: 0, medium: 0, low: 0 };
+          findings = auditData.top_issues || [];
+        } else if (jsonArrayMatch) {
+          // Legacy format - array of findings
+          findings = JSON.parse(jsonArrayMatch[0]);
+          // Calculate score and breakdown from findings
+          severityBreakdown = {
+            critical: findings.filter(f => f.severity === 'critical').length,
+            high: findings.filter(f => f.severity === 'high').length,
+            medium: findings.filter(f => f.severity === 'medium').length,
+            low: findings.filter(f => f.severity === 'low').length,
+          };
+          // Use real metrics for performance, accessibility, SEO, and calculate design from findings
+          uxScore = Math.round((
+            performanceScore * 0.3 +
+            accessibilityScore * 0.3 +
+            Math.max(0, 100 - (
+              severityBreakdown.critical * 15 +
+              severityBreakdown.high * 10 +
+              severityBreakdown.medium * 5 +
+              severityBreakdown.low * 2
+            )) * 0.25 +
+            seoScore * 0.15
+          ) * 100) / 100;
         }
       }
     } catch (error) {
       console.error('Error parsing AI response:', error);
-      // Fallback findings if AI parsing fails
+      // Fallback findings if AI parsing fails - use real metrics
       findings = [
         {
           category: 'accessibility',
@@ -303,26 +817,36 @@ Focus on the most impactful issues. Return 8-15 findings total.`;
           suggestion: 'Review the full audit report',
         },
       ];
+      severityBreakdown = { critical: 0, high: 1, medium: 0, low: 0 };
+      categoryScores = { 
+        performance: performanceScore, 
+        accessibility: accessibilityScore, 
+        usability: 70, 
+        design: 70, 
+        seo: seoScore 
+      };
+      uxScore = Math.round((
+        performanceScore * 0.3 +
+        accessibilityScore * 0.3 +
+        70 * 0.25 +
+        seoScore * 0.15
+      ) * 100) / 100;
+      justification = 'Fallback score due to parsing error - using real metrics where available';
     }
 
-    // Calculate summary
+    // Calculate summary using AI-provided data or calculated values
     const summary = {
       totalIssues: findings.length,
-      critical: findings.filter(f => f.severity === 'critical').length,
-      high: findings.filter(f => f.severity === 'high').length,
-      medium: findings.filter(f => f.severity === 'medium').length,
-      low: findings.filter(f => f.severity === 'low').length,
+      critical: severityBreakdown.critical,
+      high: severityBreakdown.high,
+      medium: severityBreakdown.medium,
+      low: severityBreakdown.low,
       accessibility: findings.filter(f => f.category === 'accessibility').length,
       usability: findings.filter(f => f.category === 'usability').length,
       design: findings.filter(f => f.category === 'design').length,
       performance: findings.filter(f => f.category === 'performance').length,
       seo: findings.filter(f => f.category === 'seo').length,
-      overallScore: Math.max(0, 100 - (
-        findings.filter(f => f.severity === 'critical').length * 15 +
-        findings.filter(f => f.severity === 'high').length * 10 +
-        findings.filter(f => f.severity === 'medium').length * 5 +
-        findings.filter(f => f.severity === 'low').length * 2
-      )),
+      overallScore: uxScore,
     };
 
     const result: AuditResult = {
@@ -331,6 +855,14 @@ Focus on the most impactful issues. Return 8-15 findings total.`;
       findings,
       summary,
       screenshot: `data:image/png;base64,${screenshot}`,
+      realMetrics: {
+        fcp: performanceMetrics.fcp,
+        lcp: performanceMetrics.lcp,
+        tti: performanceMetrics.tti,
+        tbt: performanceMetrics.tbt,
+        cls: performanceMetrics.cls,
+        speedIndex: performanceMetrics.speedIndex,
+      },
     };
 
     return NextResponse.json(result);

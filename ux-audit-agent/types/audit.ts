@@ -26,7 +26,16 @@ export interface AuditResult {
     overallScore: number;
   };
   screenshot?: string;
+  realMetrics?: {
+    fcp: number;
+    lcp: number;
+    tti: number;
+    tbt: number;
+    cls: number;
+    speedIndex: number;
+  };
 }
+
 
 
 
